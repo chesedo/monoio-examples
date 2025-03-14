@@ -1,11 +1,14 @@
 use bytes::BytesMut;
 use http::header::CONTENT_TYPE;
 use http::{Response, StatusCode};
-use httparse::Status;
+use httparse::{EMPTY_HEADER, Status};
 use monoio::io::{AsyncReadRent, AsyncWriteRentExt};
 use monoio::net::{TcpListener, TcpStream};
 use std::error::Error;
 use std::net::SocketAddr;
+
+const MAX_HEADERS: usize = 64;
+const BUFFER_SIZE: usize = 8192;
 
 #[monoio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -24,44 +27,63 @@ async fn main() -> Result<(), Box<dyn Error>> {
 }
 
 async fn handle_connection(mut stream: TcpStream) -> Result<(), Box<dyn Error>> {
-    let buffer = BytesMut::with_capacity(4096);
+    let mut buffer = BytesMut::with_capacity(BUFFER_SIZE);
 
-    // Read the request
-    let (res, buffer) = stream.read(buffer).await;
-    let bytes_read = res?;
+    // Keep reading from the connection until it's closed
+    loop {
+        // Read the request
+        buffer.clear();
+        let (res, buf) = stream.read(buffer).await;
+        buffer = buf;
 
-    if bytes_read == 0 {
-        return Ok(()); // Connection closed
+        match res {
+            Ok(0) => return Ok(()), // Connection closed
+            Ok(bytes_read) => {
+                // Process the HTTP request
+                let mut headers = [EMPTY_HEADER; MAX_HEADERS];
+                let mut req = httparse::Request::new(&mut headers);
+
+                match req.parse(&buffer[..bytes_read]) {
+                    Ok(Status::Complete(_)) => {
+                        // Create and send response
+                        let res = handle_request(req).await?;
+
+                        // Serialize response
+                        let serialized = serialize_response(&res);
+
+                        // Write response
+                        if let Err(e) = stream.write_all(serialized.into_bytes()).await.0 {
+                            return Err(e.into());
+                        }
+                    }
+                    Ok(Status::Partial) => {
+                        // Handle incomplete request - in a real server you might wait for more data
+                        // For simplicity in benchmark, treat as error
+                        let response = Response::builder()
+                            .status(StatusCode::BAD_REQUEST)
+                            .header(CONTENT_TYPE, "text/plain")
+                            .body("Incomplete HTTP request")?;
+
+                        let serialized = serialize_response(&response);
+                        stream.write_all(serialized.into_bytes()).await.0?;
+                        return Ok(());
+                    }
+                    Err(_) => {
+                        // Handle parsing error
+                        let response = Response::builder()
+                            .status(StatusCode::BAD_REQUEST)
+                            .header(CONTENT_TYPE, "text/plain")
+                            .body("Bad Request")?;
+
+                        let serialized = serialize_response(&response);
+                        stream.write_all(serialized.into_bytes()).await.0?;
+                        return Ok(());
+                    }
+                }
+            }
+            Err(e) => return Err(e.into()),
+        }
     }
-
-    // Parse the HTTP request using httparse
-    let mut headers = [httparse::EMPTY_HEADER; 16];
-    let mut req = httparse::Request::new(&mut headers);
-
-    let response = match req.parse(&buffer) {
-        Ok(Status::Complete(_)) => handle_request(req).await?,
-        Ok(Status::Partial) => {
-            // Incomplete request
-            Response::builder()
-                .status(StatusCode::BAD_REQUEST)
-                .header(CONTENT_TYPE, "text/plain")
-                .body("Incomplete HTTP request")?
-        }
-        Err(_) => {
-            // Invalid request
-            Response::builder()
-                .status(StatusCode::BAD_REQUEST)
-                .body("Bad Request")?
-        }
-    };
-
-    // Serialize the response
-    let serialized = serialize_response(&response);
-
-    // Send response
-    stream.write_all(serialized.into_bytes()).await.0?;
-
-    Ok(())
 }
 
 async fn handle_request<'a>(
@@ -86,7 +108,7 @@ async fn handle_request<'a>(
     Ok(res)
 }
 
-// A simplified response serializer
+// Simple but effective response serializer
 fn serialize_response<T: AsRef<[u8]>>(response: &Response<T>) -> String {
     let status = response.status();
     let headers = response.headers();
@@ -105,7 +127,7 @@ fn serialize_response<T: AsRef<[u8]>>(response: &Response<T>) -> String {
         }
     }
 
-    // Add Content-Length if not present
+    // Add Content-Length
     if !headers.contains_key("Content-Length") {
         result.push_str(&format!("Content-Length: {}\r\n", body.len()));
     }
