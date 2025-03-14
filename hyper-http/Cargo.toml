@@ -1,0 +1,11 @@
+[package]
+name = "hyper-http"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bytes.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+tokio.workspace = true
