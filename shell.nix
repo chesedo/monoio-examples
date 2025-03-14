@@ -9,6 +9,14 @@ let
   };
   rustVersion = "1.85.0";
 
+  # Create a Python environment with required packages
+  pythonEnv = pkgs.python3.withPackages (ps: with ps; [
+    matplotlib
+    numpy
+    pandas
+    seaborn
+  ]);
+
   # List of extra tools
   toolList = with pkgs; [
     rust-analyzer
@@ -16,6 +24,8 @@ let
     cargo-outdated
 
     wrk
+    bc
+    lsof
   ];
 
   # Function to get the name of a derivation
@@ -30,6 +40,7 @@ pkgs.mkShell {
     (rust-bin.stable.${rustVersion}.default.override {
       extensions = [ "rust-src" ];
     })
+    pythonEnv
   ] ++ toolList;
 
 shellHook = ''
