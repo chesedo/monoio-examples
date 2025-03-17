@@ -7,4 +7,5 @@ edition = "2024"
 bytes.workspace = true
 http.workspace = true
 httparse.workspace = true
+httpdate.workspace = true
 monoio.workspace = true

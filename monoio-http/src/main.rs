@@ -2,10 +2,12 @@ use bytes::{BufMut, BytesMut};
 use http::header::{CONTENT_LENGTH, CONTENT_TYPE, DATE};
 use http::{Response, StatusCode};
 use httparse::{EMPTY_HEADER, Status};
+use httpdate::fmt_http_date;
 use monoio::io::{AsyncReadRent, AsyncWriteRentExt};
 use monoio::net::{TcpListener, TcpStream};
 use std::error::Error;
 use std::net::SocketAddr;
+use std::time::SystemTime;
 
 const MAX_HEADERS: usize = 64;
 const BUFFER_SIZE: usize = 8192;
@@ -142,6 +144,14 @@ fn serialize_response<T: AsRef<[u8]>>(response: &Response<T>) -> BytesMut {
         buffer.put_slice(b"\r\n");
     }
 
+    // Add Date if not present
+    if !headers.contains_key(DATE) {
+        let now = SystemTime::now();
+        buffer.put_slice(DATE.as_str().as_bytes());
+        buffer.put_slice(b": ");
+        buffer.put_slice(fmt_http_date(now).as_bytes());
+        buffer.put_slice(b"\r\n");
+    }
 
     // Finish headers
     buffer.put_slice(b"\r\n");
