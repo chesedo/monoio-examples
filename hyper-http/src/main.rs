@@ -14,7 +14,7 @@ use tokio::net::{TcpListener, TcpStream};
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     // Define the socket address
-    let addr: SocketAddr = ([127, 0, 0, 1], 8080).into();
+    let addr: SocketAddr = ([0, 0, 0, 0], 8080).into();
 
     // Create a TCP listener
     let listener = TcpListener::bind(addr).await?;

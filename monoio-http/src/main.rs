@@ -17,7 +17,7 @@ const BUFFER_SIZE: usize = 8192;
 
 fn main() -> Result<(), Box<dyn Error>> {
     // Define the socket address
-    let addr: SocketAddr = ([127, 0, 0, 1], 8080).into();
+    let addr: SocketAddr = ([0, 0, 0, 0], 8080).into();
     println!("Listening on http://{addr}");
 
     let thread_count = available_parallelism().map_or(1, NonZeroUsize::get);

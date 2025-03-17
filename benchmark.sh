@@ -1,22 +1,24 @@
 #!/usr/bin/env bash
-# HTTP Server Benchmarking Script for monoio vs hyper comparison
+# HTTP Server Benchmarking Script for monoio vs hyper comparison with remote server
 
 set -e
 
 # Configuration
-SERVER_HOST="127.0.0.1"
+SERVER_HOST="server-machine-ip"  # Replace with your server machine's IP
+SERVER_USER="username"           # Replace with SSH username for server machine
+SERVER_PATH="/path/to/project"   # Path to the project on server machine
 SERVER_PORT="8080"
 BASE_URL="http://${SERVER_HOST}:${SERVER_PORT}"
-DURATION=30  # Duration in seconds
-CONNECTIONS=(10 50 100 250 500 1000)  # Number of concurrent connections to test
-THREADS=4    # Number of threads for wrk
+DURATION=30                      # Duration in seconds
+CONNECTIONS=(10 50 100 250 500 1000) # Number of concurrent connections to test
+THREADS=4                        # Number of threads for wrk
 ENDPOINTS=("/" "/health")
-TIMEOUT="2s"  # Timeout for wrk
+TIMEOUT="2s"                     # Timeout for wrk
 
 # Check for required tools
-command -v wrk >/dev/null 2>&1 || { echo "Error: wrk is required but not installed. Install it with 'brew install wrk' or visit https://github.com/wg/wrk"; exit 1; }
+command -v wrk >/dev/null 2>&1 || { echo "Error: wrk is required but not installed. Install it with your package manager"; exit 1; }
 command -v bc >/dev/null 2>&1 || { echo "Error: bc is required but not installed. Install it with your package manager"; exit 1; }
-command -v lsof >/dev/null 2>&1 || { echo "Error: lsof is required but not installed. Install it with your package manager"; exit 1; }
+command -v ssh >/dev/null 2>&1 || { echo "Error: ssh is required but not installed. Install it with your package manager"; exit 1; }
 
 # Output directory
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
@@ -30,18 +32,12 @@ CSV_FILE="${OUTPUT_DIR}/results.csv"
 # Initialize CSV file with header
 echo "implementation,endpoint,connections,threads,duration,requests,requests_per_sec,latency_avg_ms,latency_p50_ms,latency_p90_ms,latency_p99_ms,transfer_per_sec,socket_errors" > "$CSV_FILE"
 
-# Function to check if port is in use
-is_port_in_use() {
-    netstat -tuln | grep ":$SERVER_PORT " > /dev/null
-    return $?
-}
-
-# Function to kill any process using the server port
-kill_process_on_port() {
-    local pid=$(lsof -t -i:$SERVER_PORT)
+# Function to kill any process using the server port on the remote server
+kill_remote_process_on_port() {
+    local pid=$(ssh ${SERVER_USER}@${SERVER_HOST} "lsof -i:${SERVER_PORT} -t" 2>/dev/null)
     if [ ! -z "$pid" ]; then
-        echo "Killing process $pid using port $SERVER_PORT" | tee -a "$LOG_FILE"
-        kill -9 $pid 2>/dev/null || true
+        echo "Killing process $pid using port $SERVER_PORT on remote server" | tee -a "$LOG_FILE"
+        ssh ${SERVER_USER}@${SERVER_HOST} "kill -9 $pid" 2>/dev/null || true
         sleep 2
     fi
 }
@@ -129,15 +125,14 @@ benchmark_implementation() {
     local implementation=$1
     local binary_name=$2
 
-    echo "Starting $implementation server..." | tee -a "$LOG_FILE"
+    echo "Starting $implementation server on remote machine..." | tee -a "$LOG_FILE"
 
     # Kill any existing process on the port
-    kill_process_on_port
+    kill_remote_process_on_port
 
-    # Start the server in background
-    echo "Running ./target/release/$binary_name" | tee -a "$LOG_FILE"
-    ./target/release/$binary_name &
-    server_pid=$!
+    # Start the server in background on the remote server
+    echo "Running $binary_name on remote server" | tee -a "$LOG_FILE"
+    ssh -f ${SERVER_USER}@${SERVER_HOST} "cd ${SERVER_PATH} && ./target/release/$binary_name > /tmp/${binary_name}.log 2>&1 &"
 
     # Wait for server to start
     echo "Waiting for server to start..." | tee -a "$LOG_FILE"
@@ -146,11 +141,11 @@ benchmark_implementation() {
     # Test server is responding
     if ! curl -s "${BASE_URL}/health" > /dev/null; then
         echo "Server failed to start or respond properly" | tee -a "$LOG_FILE"
-        kill -9 $server_pid 2>/dev/null || true
+        kill_remote_process_on_port
         return 1
     fi
 
-    echo "Server is running with PID $server_pid, beginning benchmarks..." | tee -a "$LOG_FILE"
+    echo "Server is running, beginning benchmarks..." | tee -a "$LOG_FILE"
 
     # Run benchmarks for each endpoint and connection count
     for endpoint in "${ENDPOINTS[@]}"; do
@@ -160,25 +155,41 @@ benchmark_implementation() {
     done
 
     # Stop the server
-    echo "Stopping $implementation server (PID $server_pid)..." | tee -a "$LOG_FILE"
-    kill -9 $server_pid
-    wait $server_pid 2>/dev/null || true
-    sleep 2
+    echo "Stopping $implementation server..." | tee -a "$LOG_FILE"
+    kill_remote_process_on_port
 
-    # Double-check the port is free
-    kill_process_on_port
+    # Fetch server logs
+    echo "Fetching server logs..." | tee -a "$LOG_FILE"
+    scp ${SERVER_USER}@${SERVER_HOST}:/tmp/${binary_name}.log "${OUTPUT_DIR}/${binary_name}.log" || true
+}
+
+# Check SSH connectivity to server
+check_server_connectivity() {
+    echo "Checking connectivity to server ${SERVER_HOST}..." | tee -a "$LOG_FILE"
+    if ! ssh -q -o BatchMode=yes -o ConnectTimeout=5 ${SERVER_USER}@${SERVER_HOST} exit; then
+        echo "Cannot connect to server ${SERVER_HOST}. Please check SSH connectivity." | tee -a "$LOG_FILE"
+        exit 1
+    fi
+    echo "Successfully connected to server ${SERVER_HOST}" | tee -a "$LOG_FILE"
 }
 
 # Main execution
 echo "Starting benchmark suite at $(date)" | tee "$LOG_FILE"
 echo "Results will be saved to $OUTPUT_DIR" | tee -a "$LOG_FILE"
+echo "Server: ${SERVER_HOST}:${SERVER_PORT}" | tee -a "$LOG_FILE"
+
+# Check connectivity
+check_server_connectivity
 
 # Make sure the port is free before starting
-kill_process_on_port
+kill_remote_process_on_port
 
-
-# Make sure we build everything first
-cargo build --release --workspace
+# Build the project on the remote server
+echo "Building $implementation on remote server..." | tee -a "$LOG_FILE"
+ssh ${SERVER_USER}@${SERVER_HOST} "cd ${SERVER_PATH} && cargo build --release" || {
+    echo "Failed to build $implementation on server" | tee -a "$LOG_FILE"
+    exit 1
+}
 
 # Benchmark monoio implementation
 benchmark_implementation "monoio-http" "monoio-http"
