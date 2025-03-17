@@ -1,5 +1,5 @@
-use bytes::BytesMut;
-use http::header::CONTENT_TYPE;
+use bytes::{BufMut, BytesMut};
+use http::header::{CONTENT_LENGTH, CONTENT_TYPE, DATE};
 use http::{Response, StatusCode};
 use httparse::{EMPTY_HEADER, Status};
 use monoio::io::{AsyncReadRent, AsyncWriteRentExt};
@@ -49,10 +49,10 @@ async fn handle_connection(mut stream: TcpStream) -> Result<(), Box<dyn Error>> 
                         let res = handle_request(req).await?;
 
                         // Serialize response
-                        let serialized = serialize_response(&res);
+                        let response_bytes = serialize_response(&res);
 
                         // Write response
-                        if let Err(e) = stream.write_all(serialized.into_bytes()).await.0 {
+                        if let Err(e) = stream.write_all(response_bytes).await.0 {
                             return Err(e.into());
                         }
                     }
@@ -64,8 +64,8 @@ async fn handle_connection(mut stream: TcpStream) -> Result<(), Box<dyn Error>> 
                             .header(CONTENT_TYPE, "text/plain")
                             .body("Incomplete HTTP request")?;
 
-                        let serialized = serialize_response(&response);
-                        stream.write_all(serialized.into_bytes()).await.0?;
+                        let response_bytes = serialize_response(&response);
+                        stream.write_all(response_bytes).await.0?;
                         return Ok(());
                     }
                     Err(_) => {
@@ -75,8 +75,8 @@ async fn handle_connection(mut stream: TcpStream) -> Result<(), Box<dyn Error>> 
                             .header(CONTENT_TYPE, "text/plain")
                             .body("Bad Request")?;
 
-                        let serialized = serialize_response(&response);
-                        stream.write_all(serialized.into_bytes()).await.0?;
+                        let response_bytes = serialize_response(&response);
+                        stream.write_all(response_bytes).await.0?;
                         return Ok(());
                     }
                 }
@@ -108,33 +108,46 @@ async fn handle_request<'a>(
     Ok(res)
 }
 
-// Simple but effective response serializer
-fn serialize_response<T: AsRef<[u8]>>(response: &Response<T>) -> String {
+// Optimized response serializer that returns bytes directly
+fn serialize_response<T: AsRef<[u8]>>(response: &Response<T>) -> BytesMut {
     let status = response.status();
     let headers = response.headers();
     let body = response.body().as_ref();
 
-    let mut result = format!(
-        "HTTP/1.1 {} {}\r\n",
-        status.as_u16(),
-        status.canonical_reason().unwrap_or("")
-    );
+    // Pre-allocate a reasonable buffer size
+    // Status line + headers + body + some extra space
+    let capacity = 128 + (headers.len() * 32) + body.len();
+    let mut buffer = BytesMut::with_capacity(capacity);
+
+    // Write status line
+    buffer.put_slice(b"HTTP/1.1 ");
+    buffer.put_slice(status.as_u16().to_string().as_bytes());
+    buffer.put_slice(b" ");
+    buffer.put_slice(status.canonical_reason().unwrap_or("").as_bytes());
+    buffer.put_slice(b"\r\n");
 
     // Add headers
     for (name, value) in headers.iter() {
-        if let Ok(value_str) = value.to_str() {
-            result.push_str(&format!("{}: {}\r\n", name, value_str));
-        }
+        buffer.put_slice(name.as_str().as_bytes());
+        buffer.put_slice(b": ");
+        buffer.put_slice(value.as_bytes());
+        buffer.put_slice(b"\r\n");
     }
 
-    // Add Content-Length
-    if !headers.contains_key("Content-Length") {
-        result.push_str(&format!("Content-Length: {}\r\n", body.len()));
+    // Add Content-Length if not present
+    if !headers.contains_key(CONTENT_LENGTH) {
+        buffer.put_slice(CONTENT_LENGTH.as_str().as_bytes());
+        buffer.put_slice(b": ");
+        buffer.put_slice(body.len().to_string().as_bytes());
+        buffer.put_slice(b"\r\n");
     }
 
-    // Finish headers and add body
-    result.push_str("\r\n");
-    result.push_str(&String::from_utf8_lossy(body));
 
-    result
+    // Finish headers
+    buffer.put_slice(b"\r\n");
+
+    // Add body
+    buffer.put_slice(body);
+
+    buffer
 }
