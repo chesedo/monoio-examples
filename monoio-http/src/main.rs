@@ -3,31 +3,66 @@ use http::header::{CONTENT_LENGTH, CONTENT_TYPE, DATE};
 use http::{Response, StatusCode};
 use httparse::{EMPTY_HEADER, Status};
 use httpdate::fmt_http_date;
+use monoio::IoUringDriver;
 use monoio::io::{AsyncReadRent, AsyncWriteRentExt};
 use monoio::net::{TcpListener, TcpStream};
 use std::error::Error;
 use std::net::SocketAddr;
+use std::num::NonZeroUsize;
+use std::thread::available_parallelism;
 use std::time::SystemTime;
 
 const MAX_HEADERS: usize = 64;
 const BUFFER_SIZE: usize = 8192;
 
-#[monoio::main]
-async fn main() -> Result<(), Box<dyn Error>> {
+fn main() -> Result<(), Box<dyn Error>> {
     // Define the socket address
     let addr: SocketAddr = ([127, 0, 0, 1], 8080).into();
-
-    // Create a TCP listener
-    let listener = TcpListener::bind(addr)?;
     println!("Listening on http://{addr}");
 
-    // Accept connections and process them
-    loop {
-        let (stream, _) = listener.accept().await?;
-        monoio::spawn(handle_connection(stream));
-    }
-}
+    let thread_count = available_parallelism().map_or(1, NonZeroUsize::get);
+    let threads: Vec<_> = (1..thread_count)
+        .map(|core| {
+            let addr = addr.clone();
 
+            std::thread::spawn(move || {
+                println!("starting on core {core}");
+                monoio::RuntimeBuilder::<IoUringDriver>::new()
+                    .build()
+                    .unwrap()
+                    .block_on(async {
+                        // Create a TCP listener
+                        let listener = TcpListener::bind(addr).unwrap();
+
+                        // Accept connections and process them
+                        loop {
+                            let (stream, _) = listener.accept().await.unwrap();
+                            monoio::spawn(handle_connection(stream));
+                        }
+                    })
+            })
+        })
+        .collect();
+
+    monoio::RuntimeBuilder::<IoUringDriver>::new()
+        .build()?
+        .block_on(async {
+            // Create a TCP listener
+            let listener = TcpListener::bind(addr).unwrap();
+
+            // Accept connections and process them
+            loop {
+                let (stream, _) = listener.accept().await.unwrap();
+                monoio::spawn(handle_connection(stream));
+            }
+        });
+
+    for thread in threads {
+        thread.join().unwrap();
+    }
+
+    Ok(())
+}
 async fn handle_connection(mut stream: TcpStream) -> Result<(), Box<dyn Error>> {
     let mut buffer = BytesMut::with_capacity(BUFFER_SIZE);
 
